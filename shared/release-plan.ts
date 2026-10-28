@@ -1,0 +1,16 @@
+export type Step={id:string;label:string;dependsOn:string[];rollback:string;irreversible:boolean;backupVerified:boolean};
+export const demoSteps:Step[]=[{id:'backup',label:'Verify restore point',dependsOn:[],rollback:'Retain restore point',irreversible:false,backupVerified:true},{id:'schema',label:'Apply backward-compatible schema',dependsOn:['backup'],rollback:'Revert additive migration after checking old readers',irreversible:false,backupVerified:true},{id:'api',label:'Release API canary',dependsOn:['schema'],rollback:'Route traffic to previous API version',irreversible:false,backupVerified:true},{id:'worker',label:'Release background worker',dependsOn:['api'],rollback:'Pause worker and redeploy previous version',irreversible:false,backupVerified:true}];
+export function validateSteps(value:unknown):Step[]{
+ if(!Array.isArray(value)||value.length<1||value.length>40)throw Error('Provide 1–40 steps');const ids=new Set<string>();
+ for(const s of value){if(!s||typeof s.id!=='string'||!/^[a-z0-9_-]{1,40}$/.test(s.id)||ids.has(s.id))throw Error('Step IDs must be unique lowercase identifiers');ids.add(s.id);if(typeof s.label!=='string'||!s.label.trim()||s.label.length>120)throw Error('Each step needs a label up to 120 characters');if(typeof s.rollback!=='string'||s.rollback.length>800)throw Error('Rollback must be text up to 800 characters');if(typeof s.irreversible!=='boolean'||typeof s.backupVerified!=='boolean'||!Array.isArray(s.dependsOn)||s.dependsOn.length>40||!s.dependsOn.every((d:unknown)=>typeof d==='string'))throw Error('Invalid step fields');}
+ for(const s of value)if(new Set(s.dependsOn).size!==s.dependsOn.length||s.dependsOn.some((d:string)=>!ids.has(d)||d===s.id))throw Error('Dependencies must be unique existing other steps');
+ return structuredClone(value);
+}
+export function analyzeRelease(value:unknown){
+ const steps=validateSteps(value),byId=new Map(steps.map(s=>[s.id,s])),visited=new Set<string>(),active=new Set<string>(),order:string[]=[],cycles:string[][]=[];
+ function visit(id:string,trail:string[]){if(active.has(id)){cycles.push([...trail.slice(trail.indexOf(id)),id]);return;}if(visited.has(id))return;active.add(id);for(const d of byId.get(id)!.dependsOn)visit(d,[...trail,id]);active.delete(id);visited.add(id);order.push(id);}
+ steps.forEach(s=>visit(s.id,[]));
+ const blocked=steps.flatMap(s=>[...(!s.rollback.trim()?[{step:s.id,reason:'Missing rollback instructions'}]:[]),...(s.irreversible&&!s.backupVerified?[{step:s.id,reason:'Irreversible step without a verified backup'}]:[])]);
+ const downstream=(id:string)=>{const found=new Set<string>();function walk(x:string){for(const s of steps)if(s.dependsOn.includes(x)&&!found.has(s.id)&&s.id!==id){found.add(s.id);walk(s.id);}}walk(id);return [...found].sort();};
+ return {ready:!cycles.length&&!blocked.length,cycles,blocked,order:cycles.length?[]:order.map(id=>byId.get(id)!),rollbackOrder:cycles.length?[]:[...order].reverse().map(id=>({id,instruction:byId.get(id)!.rollback})),blastRadius:steps.map(s=>({id:s.id,affected:downstream(s.id)})),limits:['Planning only: no deployment commands are executed.','Declared dependencies and backup checks are user assertions, not infrastructure evidence.','Reverse dependency order is a rehearsal checklist, not a proven rollback.']};
+}
